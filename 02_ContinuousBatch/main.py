@@ -14,15 +14,15 @@ async def run_one(mllm: MiniVLLM, prompt: str):
 
 async def main():
     model_id = "Qwen/Qwen2.5-1.5B-Instruct"
-    mllm = MiniVLLM(model_id)
+    mllm = MiniVLLM(model_id, enable_stats=False)
 
     # 单请求
     #await run_one(mllm, "请写一个关于机器学习的短文，分三段。")
 
     # 多请求并发（用于观察 continuous batching）
     await asyncio.gather(
-        run_one(mllm, "解释一下什么是梯度下降。"),
-        run_one(mllm, "用通俗语言介绍一下Transformer。"),
+        run_one(mllm, "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n解释一下什么是梯度下降。\n<|im_end|>\n<|im_start|>assistant\n"),
+        run_one(mllm, "<|im_start|>system\nYou are a helpful assistant.\n<|im_end|>\n<|im_start|>user\n用通俗语言介绍一下Transformer。\n<|im_end|>\n<|im_start|>assistant\n"),
     )
 
 

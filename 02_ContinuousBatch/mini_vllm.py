@@ -36,7 +36,13 @@ class GenerationState:
 
 
 class MiniVLLM:
-    def __init__(self, model_id: str, bnb_config=None, device_map="cuda"):
+    def __init__(
+        self,
+        model_id: str,
+        bnb_config=None,
+        device_map="cuda",
+        enable_stats: bool = True,
+    ):
         self.model = Model(model_id, bnb_config, device_map=device_map)
         self.tokenizer = Tokenizer(model_id)
         self.scheduler = Scheduler()
@@ -44,7 +50,7 @@ class MiniVLLM:
         self.engine_task = None
 
         self.engine_stats = EngineStats()
-        self.enable_stats = True
+        self.enable_stats = enable_stats
 
     async def generate(
             self, 
@@ -434,6 +440,9 @@ class MiniVLLM:
 
     def print_performance_report(self):
         """打印完整的性能报告"""
+        if not self.enable_stats:
+            print("性能统计已关闭（enable_stats=False），跳过性能报告。")
+            return
         self.engine_stats.print_summary()
 
     def _split_past_kv_back(self, merged_past_kv, request_list):
