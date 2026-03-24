@@ -8,6 +8,15 @@ import time
 from mini_vllm import MiniVLLM
 
 
+def build_chatml_prompt(user_prompt: str, system_prompt: str = "You are a helpful assistant.") -> str:
+    """将用户输入封装为 ChatML 格式。"""
+    return (
+        f"<|im_start|>system\n{system_prompt}\n<|im_end|>\n"
+        f"<|im_start|>user\n{user_prompt}\n<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+
 async def test_single_requests(mllm, prompts):
     """串行处理多个请求"""
     print("=" * 60)
@@ -59,39 +68,39 @@ async def main():
     
     # 准备多个测试 prompt
     prompts = [
-        "请用一句话介绍人工智能",
-        "请用一句话介绍机器学习",
-        "请用一句话介绍深度学习",
-        "请用一句话介绍自然语言处理",
-        "请用2句话介绍中国的电影发展历史",
-        "请用3句话介绍中国的电影发展历史",
-        "请用4句话介绍中国的电影发展历史",
-        "请用5句话介绍中国的电影发展历史",
-        "请用6句话介绍中国的电影发展历史",
-        "请用7句话介绍中国的电影发展历史",
-        "请用8句话介绍中国的电影发展历史",
-        "请用9句话介绍中国的电影发展历史",
-        "请用10句话介绍中国的电影发展历史",
-        "请用11句话介绍中国的电影发展历史",
-        "请用2句话介绍人工智能",
-        "请用3句话介绍机器学习",
-        "请用4句话介绍深度学习",
-        "请用5句话介绍自然语言处理",
-        "请用五句话介绍中国的发展历史",
-        "请用五句话介绍中国的小说发展历史",
-        "请用五句话介绍中国的诗歌发展历史",
-        "请用五句话介绍中国的地形发展历史",
-        "请用五句话介绍中国的英雄发展历史",
-        "请用五句话介绍中国的游戏发展历史",
-        "请用五句话介绍中国的电视发展历史",
-        "请用五句话介绍中国的广播发展历史",
-        "请用五句话介绍中国的音乐发展历史",
-        "请用五句话介绍中国的自行车发展历史",
+        build_chatml_prompt("请用一句话介绍人工智能"),
+        build_chatml_prompt("请用一句话介绍机器学习"),
+        build_chatml_prompt("请用一句话介绍深度学习"),
+        build_chatml_prompt("请用一句话介绍自然语言处理"),
+        build_chatml_prompt("请用2句话介绍中国的电影发展历史"),
+        build_chatml_prompt("请用3句话介绍中国的电影发展历史"),
+        build_chatml_prompt("请用4句话介绍中国的电影发展历史"),
+        build_chatml_prompt("请用5句话介绍中国的电影发展历史"),
+        build_chatml_prompt("请用6句话介绍中国的电影发展历史"),
+        build_chatml_prompt("请用7句话介绍中国的电影发展历史"),
+        build_chatml_prompt("请用8句话介绍中国的电影发展历史"),
+        build_chatml_prompt("请用9句话介绍中国的电影发展历史"),
+        build_chatml_prompt("请用10句话介绍中国的电影发展历史"),
+        build_chatml_prompt("请用11句话介绍中国的电影发展历史"),
+        build_chatml_prompt("请用2句话介绍人工智能"),
+        build_chatml_prompt("请用3句话介绍机器学习"),
+        build_chatml_prompt("请用4句话介绍深度学习"),
+        build_chatml_prompt("请用5句话介绍自然语言处理"),
+        build_chatml_prompt("请用五句话介绍中国的发展历史"),
+        build_chatml_prompt("请用五句话介绍中国的小说发展历史"),
+        build_chatml_prompt("请用五句话介绍中国的诗歌发展历史"),
+        build_chatml_prompt("请用五句话介绍中国的地形发展历史"),
+        build_chatml_prompt("请用五句话介绍中国的英雄发展历史"),
+        build_chatml_prompt("请用五句话介绍中国的游戏发展历史"),
+        build_chatml_prompt("请用五句话介绍中国的电视发展历史"),
+        build_chatml_prompt("请用五句话介绍中国的广播发展历史"),
+        build_chatml_prompt("请用五句话介绍中国的音乐发展历史"),
+        build_chatml_prompt("请用五句话介绍中国的自行车发展历史"),
     ]
     
     # 预热
     print("预热中...")
-    async for _ in mllm.generate("预热", max_new_tokens=10):
+    async for _ in mllm.generate(build_chatml_prompt("预热"), max_new_tokens=10):
         pass
     
     # 测试1: 串行

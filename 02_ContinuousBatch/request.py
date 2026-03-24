@@ -20,7 +20,7 @@ class Request:
     next_token: Any = None                  # 推理生成的下一个token
     finished: bool = False                  # 本requset是否已经完成推理
     gen_text: str = ""
-    # sampling_params: SamplingParams = SamplingParams()
+    # 采样参数
     sampling_params: 'SamplingParams' = field(default_factory=lambda: SamplingParams())
     
 
