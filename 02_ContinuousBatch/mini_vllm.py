@@ -271,8 +271,8 @@ class MiniVLLM:
                 elapsed_time=elapsed
             )
 
-        print(f"[Prefill] batch_size={len(request_list)}, "
-              f"total={elapsed:.3f}s, forward={forward_time:.3f}s")
+            print(f"[Prefill] batch_size={len(request_list)}, "
+                  f"total={elapsed:.3f}s, forward={forward_time:.3f}s")
             
         return promoted
         
@@ -310,7 +310,7 @@ class MiniVLLM:
             for req in request_list:
                 k, v = req.past_key_values[layer_idx]
                 cur_len = k.shape[2]
-                
+                # 在Decode阶段强行对齐不同长度的历史KV Cache
                 if cur_len < max_kv_len:
                     pad_len = max_kv_len - cur_len
                     k = torch.cat([k, torch.zeros_like(k[:, :, :pad_len, :])], dim=2)
@@ -337,7 +337,7 @@ class MiniVLLM:
             torch.cuda.synchronize()
         forward_start = time.time()
 
-        # Batch forward - 无需转换！
+        # Batch forward
         outputs = self.model.forward(
             input_ids=next_tokens,
             past_key_values=merged_cache,
@@ -410,11 +410,11 @@ class MiniVLLM:
                 elapsed_time=elapsed
             )
         
-        print(f"[Decode] batch_size={batch_size}, "
-            f"total={elapsed:.3f}s, "
-            f"merge={kv_merge_time:.3f}s, "
-            f"forward={forward_time:.3f}s, "
-            f"split={kv_split_time:.3f}s")    
+            print(f"[Decode] batch_size={batch_size}, "
+                f"total={elapsed:.3f}s, "
+                f"merge={kv_merge_time:.3f}s, "
+                f"forward={forward_time:.3f}s, "
+                f"split={kv_split_time:.3f}s")    
         
         return finished_ids
 
