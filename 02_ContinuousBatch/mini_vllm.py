@@ -52,6 +52,19 @@ class MiniVLLM:
         self.engine_stats = EngineStats()
         self.enable_stats = enable_stats
 
+    def _get_cache_num_layers(self, cache) -> int:
+        """兼容新版 DynamicCache 和旧版 tuple cache 的层数读取。"""
+        if hasattr(cache, "layers"):
+            return len(cache.layers)
+        return len(cache)
+
+    def _get_layer_kv(self, cache, layer_idx: int):
+        """兼容新版 DynamicCache 和旧版 tuple cache 的单层 KV 读取。"""
+        if hasattr(cache, "layers"):
+            layer = cache.layers[layer_idx]
+            return layer.keys, layer.values
+        return cache[layer_idx]
+
     async def generate(
             self, 
             prompt: str, 
@@ -228,10 +241,10 @@ class MiniVLLM:
         for i, req in enumerate(request_list):
             real_len = int(lengths[i].item())
             req_cache = DynamicCache()
-            num_layers = len(outputs.past_key_values)
+            num_layers = self._get_cache_num_layers(outputs.past_key_values)
 
             for layer_idx in range(num_layers):
-                k, v = outputs.past_key_values[layer_idx]
+                k, v = self._get_layer_kv(outputs.past_key_values, layer_idx)
                 k_req = k[i:i+1, :, :real_len, :].contiguous()
                 v_req = v[i:i+1, :, :real_len, :].contiguous()
                 req_cache.update(k_req, v_req, layer_idx)
@@ -307,14 +320,14 @@ class MiniVLLM:
         
         # 合并 KV Cache
         merged_cache = DynamicCache()
-        num_layers = len(request_list[0].past_key_values)
+        num_layers = self._get_cache_num_layers(request_list[0].past_key_values)
         
         for layer_idx in range(num_layers):
             keys = []
             values = []
             
             for req in request_list:
-                k, v = req.past_key_values[layer_idx]
+                k, v = self._get_layer_kv(req.past_key_values, layer_idx)
                 cur_len = k.shape[2]
                 # 在Decode阶段强行对齐不同长度的历史KV Cache
                 if cur_len < max_kv_len:
@@ -373,7 +386,7 @@ class MiniVLLM:
             # 保持 DynamicCache 格式
             req_cache = DynamicCache()
             for layer_idx in range(num_layers):
-                k, v = outputs.past_key_values[layer_idx]
+                k, v = self._get_layer_kv(outputs.past_key_values, layer_idx)
                 k_req = k[i:i+1, :, :real_len, :].contiguous()
                 v_req = v[i:i+1, :, :real_len, :].contiguous()
                 req_cache.update(k_req, v_req, layer_idx)
@@ -426,12 +439,12 @@ class MiniVLLM:
 
     def _merge_past_kv(self, request_list):
         # 每个 req.past_key_values: tuple[(k,v)]，其中 k/v shape [1, H, S, D]
-        num_layers = len(request_list[0].past_key_values)
+        num_layers = self._get_cache_num_layers(request_list[0].past_key_values)
         merged = []
 
         for l in range(num_layers):
-            k_list = [req.past_key_values[l][0] for req in request_list]  # [1,H,S,D] x N
-            v_list = [req.past_key_values[l][1] for req in request_list]
+            k_list = [self._get_layer_kv(req.past_key_values, l)[0] for req in request_list]
+            v_list = [self._get_layer_kv(req.past_key_values, l)[1] for req in request_list]
             k = torch.cat(k_list, dim=0)  # [N,H,S,D]
             v = torch.cat(v_list, dim=0)  # [N,H,S,D]
             merged.append((k, v))

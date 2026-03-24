@@ -61,12 +61,16 @@ class Model:
 
         if past_key_values is None:
             return None
-        
-        num_layers = len(past_key_values)
 
-
-        key_shape = past_key_values[0][0].shape  # (batch_size, num_heads, seq_len, head_dim)
-        value_shape = past_key_values[0][1].shape  # (batch_size, num_heads, seq_len, head_dim)
+        if hasattr(past_key_values, "layers"):
+            num_layers = len(past_key_values.layers)
+            first_layer = past_key_values.layers[0]
+            key_shape = first_layer.keys.shape
+            value_shape = first_layer.values.shape
+        else:
+            num_layers = len(past_key_values)
+            key_shape = past_key_values[0][0].shape  # (batch_size, num_heads, seq_len, head_dim)
+            value_shape = past_key_values[0][1].shape  # (batch_size, num_heads, seq_len, head_dim)
 
         total_elements = sum([key_shape.numel() + value_shape.numel() for _ in range(num_layers)])
         

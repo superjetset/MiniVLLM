@@ -166,9 +166,18 @@ def calculate_kv_cache_size_mb(past_key_values) -> float:
         return 0.0
     
     total_bytes = 0
-    
-    # 处理 DynamicCache
-    if hasattr(past_key_values, '__len__'):
+
+    if hasattr(past_key_values, "layers"):
+        for layer in past_key_values.layers:
+            k = getattr(layer, "keys", None)
+            v = getattr(layer, "values", None)
+            if torch.is_tensor(k):
+                total_bytes += k.element_size() * k.numel()
+            if torch.is_tensor(v):
+                total_bytes += v.element_size() * v.numel()
+        return total_bytes / (1024 ** 2)
+
+    if hasattr(past_key_values, "__len__"):
         for layer_kv in past_key_values:
             if isinstance(layer_kv, (tuple, list)) and len(layer_kv) == 2:
                 k, v = layer_kv
