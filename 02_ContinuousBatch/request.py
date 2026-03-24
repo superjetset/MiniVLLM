@@ -12,13 +12,13 @@ class SamplingParams:
 @dataclass
 class Request:
     request_id: int = -1
-    prefill_token_ids: torch.Tensor = None
-    gen_token_ids: torch.Tensor = None
-    past_key_values: Any = None
-    max_gen_tokens: Any = None
+    prefill_token_ids: torch.Tensor = None  # prefill阶段的token_ids，等同于prompt的token_ids
+    gen_token_ids: torch.Tensor = None      # 已经生成的tokens
+    past_key_values: Any = None             # KVCache
+    max_gen_tokens: Any = None              # 本request允许生成最大的token数
     eos_token_id: Any = None
-    next_token: Any = None
-    finished: bool = False
+    next_token: Any = None                  # 推理生成的下一个token
+    finished: bool = False                  # 本requset是否已经完成推理
     gen_text: str = ""
     # sampling_params: SamplingParams = SamplingParams()
     sampling_params: 'SamplingParams' = field(default_factory=lambda: SamplingParams())

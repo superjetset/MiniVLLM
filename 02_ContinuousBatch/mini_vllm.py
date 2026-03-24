@@ -74,7 +74,7 @@ class MiniVLLM:
 
         # 启动引擎循环 (如果还没启动)
         if self.engine_task is None or self.engine_task.done():
-            self.engine_task = asyncio.create_task(self._engine_loop())        
+            self.engine_task = asyncio.create_task(self._engine_loop())
 
         # 接收已经生成的token，并以stream方式返回
         emitted = 0
@@ -144,7 +144,10 @@ class MiniVLLM:
             prompted_ids =  await self._batch_prefill(waiting)
             for rid in prompted_ids:
                 self.scheduler.promote_to_running(rid)
-
+                # ！！！注意，我们在这里的处理会导致一个请求完成了prefill之后，会在同一个step中立刻进行一次decode。
+                #  相当于我们在一个step中对一个request forward了两次。这会带来性能和调度公平性上的问题。
+                # 不过我们是“玩具”引擎，为了简单直观，我们还是赶紧把他送往decode吧。
+        
         # 处理 running_list 中的请求 (decode)
         if self.scheduler.running_list:
             running = self.scheduler.running_list[:]
@@ -214,7 +217,7 @@ class MiniVLLM:
         next_logits = outputs.logits[batch_idx, last_pos, :]   # 每条样本最后一个真实 token 位置        
         # next_logits shape: [batch_size, vocab_size]
 
-        # 6. 切分 KV Cache 并采样
+        # 切分 KV Cache 并采样
         promoted = []
         for i, req in enumerate(request_list):
             real_len = int(lengths[i].item())
@@ -227,7 +230,7 @@ class MiniVLLM:
                 v_req = v[i:i+1, :, :real_len, :].contiguous()
                 req_cache.update(k_req, v_req, layer_idx)
 
-            req.past_key_values = req_cache  # 改这里
+            req.past_key_values = req_cache
 
             # 采样下一个 token
             tok = int(self._sample(next_logits[i:i+1,:], 
