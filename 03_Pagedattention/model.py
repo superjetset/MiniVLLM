@@ -1,19 +1,73 @@
+from pathlib import Path
+
 import torch
 from transformers import AutoModelForCausalLM
-from transformers.cache_utils import DynamicCache
 
 
 #加载HF模型
 class Model:
-    def __init__(self, model_id: str, bnb_config= None, device_map="cuda"):
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            quantization_config=bnb_config,
+    def __init__(
+        self,
+        model_id: str,
+        bnb_config=None,
+        device_map="cuda",
+        trust_remote_code: bool = True,
+        cache_dir: str | None = None,
+        local_files_only: bool = False,
+    ):
+        self.model = self._load_model(
+            model_id=model_id,
+            bnb_config=bnb_config,
             device_map=device_map,
-            trust_remote_code=True
+            trust_remote_code=trust_remote_code,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
         )
         self.eos_token_id = self.model.config.eos_token_id
         self.device_map = self.model.device
+
+    def _load_model(
+        self,
+        model_id: str,
+        bnb_config=None,
+        device_map="cuda",
+        trust_remote_code: bool = True,
+        cache_dir: str | None = None,
+        local_files_only: bool = False,
+    ):
+        load_kwargs = {
+            "quantization_config": bnb_config,
+            "device_map": device_map,
+            "trust_remote_code": trust_remote_code,
+        }
+        if cache_dir is not None:
+            load_kwargs["cache_dir"] = cache_dir
+        if local_files_only:
+            load_kwargs["local_files_only"] = True
+
+        try:
+            return AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
+        except Exception as exc:
+            is_local_path = Path(model_id).exists()
+            if local_files_only or is_local_path:
+                raise RuntimeError(
+                    f"Failed to load model from '{model_id}'. "
+                    "Please verify the local path or cached files are complete."
+                ) from exc
+
+            fallback_kwargs = dict(load_kwargs)
+            fallback_kwargs["local_files_only"] = True
+            try:
+                print(
+                    "[Model] Remote load failed, retrying with local cache only. "
+                    "If this also fails, use a local model path or pre-download the model."
+                )
+                return AutoModelForCausalLM.from_pretrained(model_id, **fallback_kwargs)
+            except Exception as fallback_exc:
+                raise RuntimeError(
+                    f"Failed to load model '{model_id}' from Hugging Face Hub, and no usable local cache was found. "
+                    "Recommended fixes: retry network access, pre-download the model, or pass a local model directory."
+                ) from fallback_exc
 
     # 单次前向传播，可用于prefill和decode
     # 返回值: 模型输出，包含logits和新的past_key_values

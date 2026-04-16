@@ -181,6 +181,20 @@ class MiniVLLM:
         offset = req.seq_len % self.block_size
         return block_id, offset
 
+    def _estimate_request_paged_kv_cache_mb(self, req: Request) -> float:
+        if self.kv_cache is None or not req.block_table:
+            return 0.0
+
+        bytes_per_block = (
+            self.kv_cache.num_kv_heads
+            * self.kv_cache.block_size
+            * self.kv_cache.head_dim
+            * self.kv_cache.dtype.itemsize
+            * 2
+        )
+        total_bytes = bytes_per_block * len(req.block_table) * self.kv_cache.num_layers
+        return total_bytes / (1024 ** 2)
+
     async def generate(
             self, 
             prompt: str, 
@@ -504,26 +518,18 @@ class MiniVLLM:
 
             append_start = time.time()
             block_id, offset = self._ensure_decode_block(req)
-            req_cache = DynamicCache()
             for layer_idx in range(num_layers):
                 # 获取当前层的KV Cache Tensor，shape:[batch_size, num_heads, seq_len, hidden_size(dim_per_head )]
                 k_full, v_full = self._get_layer_kv(outputs.past_key_values, layer_idx)
-                k_hist, v_hist = request_kv_list[i][layer_idx]
 
                 # batch merge时所有请求都被pad到了max_kv_len，所以本步新token总是落在统一的最后一个位置
                 k_new = k_full[i:i+1, :, max_kv_len:max_kv_len + 1, :].contiguous()
                 v_new = v_full[i:i+1, :, max_kv_len:max_kv_len + 1, :].contiguous()
 
-                # request自己的连续KV = 原始历史KV + 本步新token KV
-                k_req = torch.cat([k_hist, k_new], dim=2).contiguous()
-                v_req = torch.cat([v_hist, v_new], dim=2).contiguous()
-                req_cache.update(k_req, v_req, layer_idx)
-
                 # 只把当前decode步新产生的最后1个token KV写回paged cache
                 self.kv_cache.append_token(layer_idx, block_id, offset, k_new, v_new)
             kv_append_time += time.time() - append_start
 
-            req.past_key_values = req_cache
             req.seq_len = real_len
             req.gen_token_ids = torch.cat(
                 [req.gen_token_ids, torch.tensor([[next_token]], device=device)],
@@ -540,7 +546,7 @@ class MiniVLLM:
             req.finished = (next_token == req.eos_token_id) or (gen_len >= req.max_gen_tokens)
             if req.finished:
                 req.stats.finished_at = time.time()
-                req.stats.final_kv_cache_mb = calculate_kv_cache_size_mb(req.past_key_values)
+                req.stats.final_kv_cache_mb = self._estimate_request_paged_kv_cache_mb(req)
                 finished_ids.append(req.request_id)
                 if req.block_table:
                     self.kv_cache.free_blocks(req.block_table)
