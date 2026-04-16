@@ -119,6 +119,57 @@ class MiniVLLM:
             rebuilt_cache.update(k_hist.contiguous(), v_hist.contiguous(), layer_idx)
         return rebuilt_cache
 
+    def _gather_request_kv(self, req: Request) -> List[tuple[torch.Tensor, torch.Tensor]]:
+        if self.kv_cache is None:
+            raise RuntimeError("Paged KV cache is not initialized")
+
+        gathered = []
+        for layer_idx in range(self.kv_cache.num_layers):
+            k_hist, v_hist = self.kv_cache.gather_sequence(
+                layer_idx=layer_idx,
+                block_table=req.block_table,
+                seq_len=req.seq_len,
+            )
+            gathered.append((k_hist.contiguous(), v_hist.contiguous()))
+        return gathered
+
+    def _merge_gathered_kv(
+        self,
+        request_kv_list: List[List[tuple[torch.Tensor, torch.Tensor]]],
+        kv_lengths: List[int],
+    ) -> tuple[DynamicCache, int]:
+        if not request_kv_list:
+            return DynamicCache(), 0
+
+        max_kv_len = max(kv_lengths)
+        merged_cache = DynamicCache()
+        num_layers = len(request_kv_list[0])
+
+        for layer_idx in range(num_layers):
+            keys = []
+            values = []
+
+            for req_idx, layer_kvs in enumerate(request_kv_list):
+                k, v = layer_kvs[layer_idx]
+                cur_len = kv_lengths[req_idx]
+
+                if cur_len < max_kv_len:
+                    pad_len = max_kv_len - cur_len
+                    pad_shape = (1, k.size(1), pad_len, k.size(3))
+                    k_pad = torch.zeros(pad_shape, dtype=k.dtype, device=k.device)
+                    v_pad = torch.zeros(pad_shape, dtype=v.dtype, device=v.device)
+                    k = torch.cat([k, k_pad], dim=2)
+                    v = torch.cat([v, v_pad], dim=2)
+
+                keys.append(k)
+                values.append(v)
+
+            batched_k = torch.cat(keys, dim=0)
+            batched_v = torch.cat(values, dim=0)
+            merged_cache.update(batched_k, batched_v, layer_idx)
+
+        return merged_cache, max_kv_len
+
     def _ensure_decode_block(self, req: Request) -> tuple[int, int]:
         if self.kv_cache is None:
             raise RuntimeError("Paged KV cache is not initialized")
@@ -270,7 +321,7 @@ class MiniVLLM:
         # pad_sequence 函数把 list[int] 变成 torch.Tensor，并填充成相同长度，返回一个二维张量
         input_ids = pad_sequence(seqs, batch_first=True, padding_value=pad_id)
 
-        # input_ids.size = [batch_size, max_len],直接说，参数0，行数，参数1，列数
+        # input_ids.size = [batch_size, max_len]，参数0，行数，参数1，列数
         max_len = input_ids.size(1)
 
         # 获得attention_mask 张量，shape = [batch_size, max_len]，与input_ids张量一样，
@@ -374,51 +425,106 @@ class MiniVLLM:
         device = self.model.model.device
         batch_size = len(request_list)
         kv_gather_time = 0.0
+        kv_merge_time = 0.0
         forward_time = 0.0
         kv_append_time = 0.0
+        
+        # 收集当前每个请求待decode的输入token，以及各自的历史KV长度
+        next_tokens = torch.tensor(
+            [[req.next_token] for req in request_list],
+            dtype=torch.long,
+            device=device,
+        )
+        kv_lengths = [req.seq_len for req in request_list]
+
+        '''
+        ----------------------------------------
+        性能时间统计 Begin
+        ----------------------------------------
+        '''
+        gather_start = time.time()
+        request_kv_list = [self._gather_request_kv(req) for req in request_list]
+        kv_gather_time += time.time() - gather_start
+
+        merge_start = time.time()
+        merged_cache, max_kv_len = self._merge_gathered_kv(request_kv_list, kv_lengths)
+        kv_merge_time += time.time() - merge_start
+
+        '''
+        ----------------------------------------
+        性能时间统计 End
+        ----------------------------------------
+        '''
+
+        # 使用broadcast 构造batch attention mask。每个请求有效长度=历史长度+本次输入的1个token
+        kv_lengths_tensor = torch.tensor(kv_lengths, device=device)
+        total_len = max_kv_len + 1
+        attention_mask = (
+            torch.arange(total_len, device=device).unsqueeze(0)
+            < (kv_lengths_tensor + 1).unsqueeze(1)
+        ).long()
+
+        '''
+        ----------------------------------------
+        性能时间统计 Begin
+        ----------------------------------------
+        '''
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        forward_start = time.time()
+        outputs = self.model.forward(
+            input_ids=next_tokens,
+            past_key_values=merged_cache,
+            attention_mask=attention_mask,
+        )
+
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        forward_time += time.time() - forward_start
+
+        '''
+        ----------------------------------------
+        性能时间统计 End
+        ----------------------------------------
+        '''
+
+        next_logits = outputs.logits[:, -1, :]
+        sampled_tokens = self._sample_batch(
+            next_logits,
+            [req.sampling_params for req in request_list],
+        )
 
         finished_ids = []
+        num_layers = self._get_cache_num_layers(outputs.past_key_values)
 
-        for req in request_list:
-            gather_start = time.time()
-            paged_cache = self._build_dynamic_cache_from_paged(req)
-            kv_gather_time += time.time() - gather_start
-
-            input_ids = torch.tensor([[req.next_token]], dtype=torch.long, device=device)
-            attention_mask = torch.ones((1, req.seq_len + 1), dtype=torch.long, device=device)
-
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            forward_start = time.time()
-            outputs = self.model.forward(
-                input_ids=input_ids,
-                past_key_values=paged_cache,
-                attention_mask=attention_mask,
-            )
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            forward_time += time.time() - forward_start
-
-            next_token = int(
-                self._sample(
-                    outputs.logits[:, -1, :],
-                    req.sampling_params.temperature,
-                    req.sampling_params.top_p,
-                ).item()
-            )
+        for i, req in enumerate(request_list):
+            next_token = int(sampled_tokens[i].item())
+            old_seq_len = kv_lengths[i]
+            real_len = old_seq_len + 1
 
             append_start = time.time()
             block_id, offset = self._ensure_decode_block(req)
-            num_layers = self._get_cache_num_layers(outputs.past_key_values)
+            req_cache = DynamicCache()
             for layer_idx in range(num_layers):
+                # 获取当前层的KV Cache Tensor，shape:[batch_size, num_heads, seq_len, hidden_size(dim_per_head )]
                 k_full, v_full = self._get_layer_kv(outputs.past_key_values, layer_idx)
-                k_new = k_full[:, :, -1:, :].contiguous()
-                v_new = v_full[:, :, -1:, :].contiguous()
+                k_hist, v_hist = request_kv_list[i][layer_idx]
+
+                # batch merge时所有请求都被pad到了max_kv_len，所以本步新token总是落在统一的最后一个位置
+                k_new = k_full[i:i+1, :, max_kv_len:max_kv_len + 1, :].contiguous()
+                v_new = v_full[i:i+1, :, max_kv_len:max_kv_len + 1, :].contiguous()
+
+                # request自己的连续KV = 原始历史KV + 本步新token KV
+                k_req = torch.cat([k_hist, k_new], dim=2).contiguous()
+                v_req = torch.cat([v_hist, v_new], dim=2).contiguous()
+                req_cache.update(k_req, v_req, layer_idx)
+
+                # 只把当前decode步新产生的最后1个token KV写回paged cache
                 self.kv_cache.append_token(layer_idx, block_id, offset, k_new, v_new)
             kv_append_time += time.time() - append_start
 
-            req.past_key_values = outputs.past_key_values
-            req.seq_len += 1
+            req.past_key_values = req_cache
+            req.seq_len = real_len
             req.gen_token_ids = torch.cat(
                 [req.gen_token_ids, torch.tensor([[next_token]], device=device)],
                 dim=-1,
@@ -453,6 +559,7 @@ class MiniVLLM:
             print(f"[Decode] batch_size={batch_size}, "
                 f"total={elapsed:.3f}s, "
                 f"gather={kv_gather_time:.3f}s, "
+                f"merge={kv_merge_time:.3f}s, "
                 f"forward={forward_time:.3f}s, "
                 f"append={kv_append_time:.3f}s")    
         
