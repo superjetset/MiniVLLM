@@ -14,7 +14,7 @@ from transformers.cache_utils import DynamicCache
 from dataclasses import dataclass
 
 from torch.nn.utils.rnn import pad_sequence
-from performance_stats import EngineStats, RequestStats, calculate_kv_cache_size_mb
+from performance_stats import EngineStats, RequestStats
 
 
 @dataclass
@@ -104,20 +104,6 @@ class MiniVLLM:
         req.block_size = self.block_size
         req.seq_len = seq_len
         req.num_prompt_tokens = seq_len
-
-    def _build_dynamic_cache_from_paged(self, req: Request) -> DynamicCache:
-        if self.kv_cache is None:
-            raise RuntimeError("Paged KV cache is not initialized")
-
-        rebuilt_cache = DynamicCache()
-        for layer_idx in range(self.kv_cache.num_layers):
-            k_hist, v_hist = self.kv_cache.gather_sequence(
-                layer_idx=layer_idx,
-                block_table=req.block_table,
-                seq_len=req.seq_len,
-            )
-            rebuilt_cache.update(k_hist.contiguous(), v_hist.contiguous(), layer_idx)
-        return rebuilt_cache
 
     def _gather_request_kv(self, req: Request) -> List[tuple[torch.Tensor, torch.Tensor]]:
         if self.kv_cache is None:
@@ -371,16 +357,6 @@ class MiniVLLM:
         self._ensure_paged_kv_cache(outputs.past_key_values)
         for i, req in enumerate(request_list):
             real_len = int(lengths[i].item())
-            req_cache = DynamicCache()
-            num_layers = self._get_cache_num_layers(outputs.past_key_values)
-
-            for layer_idx in range(num_layers):
-                k, v = self._get_layer_kv(outputs.past_key_values, layer_idx)
-                k_req = k[i:i+1, :, :real_len, :].contiguous()
-                v_req = v[i:i+1, :, :real_len, :].contiguous()
-                req_cache.update(k_req, v_req, layer_idx)
-
-            req.past_key_values = req_cache
             self._store_prefill_in_paged_cache(req, outputs.past_key_values, i, real_len)
 
             # 采样下一个 token
@@ -400,7 +376,7 @@ class MiniVLLM:
             '''
             req.stats.prefill_end_at = time.time()
             req.stats.first_token_at = time.time()
-            req.stats.prefill_kv_cache_mb = calculate_kv_cache_size_mb(req.past_key_values)
+            req.stats.prefill_kv_cache_mb = self._estimate_request_paged_kv_cache_mb(req)
 
 
             # 检查是否结束
@@ -571,66 +547,12 @@ class MiniVLLM:
         
         return finished_ids
 
-    def _merge_past_kv(self, request_list):
-        # 每个 req.past_key_values: tuple[(k,v)]，其中 k/v shape [1, H, S, D]
-        num_layers = self._get_cache_num_layers(request_list[0].past_key_values)
-        merged = []
-
-        for l in range(num_layers):
-            k_list = [self._get_layer_kv(req.past_key_values, l)[0] for req in request_list]
-            v_list = [self._get_layer_kv(req.past_key_values, l)[1] for req in request_list]
-            k = torch.cat(k_list, dim=0)  # [N,H,S,D]
-            v = torch.cat(v_list, dim=0)  # [N,H,S,D]
-            merged.append((k, v))
-
-        return tuple(merged)
-
     def print_performance_report(self):
         """打印完整的性能报告"""
         if not self.enable_stats:
             print("性能统计已关闭（enable_stats=False），跳过性能报告。")
             return
         self.engine_stats.print_summary()
-
-    def _split_past_kv_back(self, merged_past_kv, request_list):
-        for i, req in enumerate(request_list):
-            req.past_key_values = tuple(
-                (k[i:i+1].contiguous(), v[i:i+1].contiguous())
-                for (k, v) in merged_past_kv
-            )
-
-
-    async def _handle_decode(self, request_list: List[Request]):
-
-        finished_ids = []
-
-        for req in request_list:
-            if req.finished:
-                finished_ids.append(req.request_id)
-                continue
-
-            input_ids = torch.tensor([[req.next_token]], dtype=torch.long, device=self.model.model.device)
-            outputs = self.model.forward(input_ids=input_ids, past_key_values=req.past_key_values)
-
-            # next_token = int(torch.argmax(outputs.logits[:, -1, :], dim=-1).item())
-            next_token = int(self._sample(outputs.logits[ :, -1, :], 
-                                   req.sampling_params.temperature, 
-                                   req.sampling_params.top_p
-                                   ).item())
-            req.past_key_values = outputs.past_key_values
-            req.next_token = next_token
-            req.gen_token_ids = torch.cat(
-                [req.gen_token_ids, torch.tensor([[next_token]], device=req.gen_token_ids.device)],
-                dim=-1,
-            )
-            req.gen_text += self.tokenizer.decode([next_token])
-
-            gen_len = req.gen_token_ids.size(1)
-            req.finished = (next_token == req.eos_token_id) or (gen_len >= req.max_gen_tokens)
-            if req.finished:
-                finished_ids.append(req.request_id)
-
-        return finished_ids
 
     def _sample_batch(
         self,
@@ -694,32 +616,35 @@ class MiniVLLM:
         return next_token_id
 
 
-    def _sample_old(self, logits: torch.Tensor, temperature: float, top_p: float)->torch.Tensor:
+    # def _sample_old(self, logits: torch.Tensor, temperature: float, top_p: float)->torch.Tensor:
 
-            if temperature <= 0.0:
-                # 直接取最大值
-                return logits.argmax(dim=-1, keepdim=True)
+    #         if temperature <= 0.0:
+    #             # 直接取最大值
+    #             return logits.argmax(dim=-1, keepdim=True)
             
-            # 应用温度
-            logits = logits / temperature
+    #         # 应用温度
 
-            # Top-p(nucleus) sampling
-            if top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                cumulative_probs = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
 
-                # 找到累计概率超过top_p的索引
-                sorted_indices_to_remove = cumulative_probs > top_p
-                # 保留第一个超过top_p的token
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0
 
-                # 将这些token的logits设为负无穷
-                indices_to_remove = sorted_indices[sorted_indices_to_remove]
-                logits[0, indices_to_remove] = -float('Inf')
+    #         logits = logits / temperature
 
-            # 计算概率分布
-            probs = torch.softmax(logits, dim=-1)
-            # 从分布中采样
-            next_token_id = torch.multinomial(probs, num_samples=1)
-            return next_token_id
+    #         # Top-p(nucleus) sampling
+    #         if top_p < 1.0:
+    #             sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+    #             cumulative_probs = torch.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+
+    #             # 找到累计概率超过top_p的索引
+    #             sorted_indices_to_remove = cumulative_probs > top_p
+    #             # 保留第一个超过top_p的token
+    #             sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+    #             sorted_indices_to_remove[..., 0] = 0
+
+    #             # 将这些token的logits设为负无穷
+    #             indices_to_remove = sorted_indices[sorted_indices_to_remove]
+    #             logits[0, indices_to_remove] = -float('Inf')
+
+    #         # 计算概率分布
+    #         probs = torch.softmax(logits, dim=-1)
+    #         # 从分布中采样
+    #         next_token_id = torch.multinomial(probs, num_samples=1)
+    #         return next_token_id

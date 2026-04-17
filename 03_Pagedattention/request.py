@@ -22,11 +22,6 @@ class Request:
     num_prompt_tokens: int = 0
     num_gen_tokens: int = 0
 
-    #-----------------------
-    # 后续用paged_kv_cache替换
-    past_key_values: Any = None             # KVCache
-    #-----------------------
-
     max_gen_tokens: Any = None              # 本request允许生成最大的token数
     eos_token_id: Any = None
     next_token: Any = None                  # 推理生成的下一个token

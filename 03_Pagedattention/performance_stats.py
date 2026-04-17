@@ -6,7 +6,6 @@ MiniVLLM 性能分析系统
 from dataclasses import dataclass, field
 from typing import List, Optional
 import time
-import torch
 
 @dataclass
 class RequestStats:
@@ -158,36 +157,6 @@ class EngineStats:
             print(f"  请求吞吐量: {self.completed_requests / total_time:.2f} req/s")
         
         print("=" * 70 + "\n")
-
-
-def calculate_kv_cache_size_mb(past_key_values) -> float:
-    """计算 KV Cache 大小（MB）"""
-    if past_key_values is None:
-        return 0.0
-    
-    total_bytes = 0
-
-    if hasattr(past_key_values, "layers"):
-        for layer in past_key_values.layers:
-            k = getattr(layer, "keys", None)
-            v = getattr(layer, "values", None)
-            if torch.is_tensor(k):
-                total_bytes += k.element_size() * k.numel()
-            if torch.is_tensor(v):
-                total_bytes += v.element_size() * v.numel()
-        return total_bytes / (1024 ** 2)
-
-    if hasattr(past_key_values, "__len__"):
-        for layer_kv in past_key_values:
-            if isinstance(layer_kv, (tuple, list)) and len(layer_kv) == 2:
-                k, v = layer_kv
-                if torch.is_tensor(k):
-                    total_bytes += k.element_size() * k.numel()
-                if torch.is_tensor(v):
-                    total_bytes += v.element_size() * v.numel()
-    
-    return total_bytes / (1024 ** 2)
-
 
 # 使用示例
 if __name__ == "__main__":
